@@ -21,6 +21,7 @@
 
 #include "../lib/includes.h"
 #include "../lib/logger.h"
+#include "../lib/util.h"
 
 #include <net/netmap_user.h>
 #include <net/if_arp.h>
@@ -208,14 +209,6 @@ timespec_diff(struct timespec const *t1, struct timespec const *t0)
 		diff.tv_nsec += NSEC_PER_SEC;
 	}
 	return diff;
-}
-
-static void
-timespec_get_monotonic(struct timespec *t)
-{
-	if (clock_gettime(CLOCK_MONOTONIC, t) == -1) {
-		log_fatal("recv-netmap", "Failed to obtain monotonic time: %d: %s", errno, strerror(errno));
-	}
 }
 
 // Drive RX and TX ringbuffers directly to wait for end-to-end connectivity.

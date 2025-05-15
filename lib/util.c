@@ -381,3 +381,10 @@ double steady_now(void)
 	return (double)now.tv_sec + (double)now.tv_usec / 1000000.;
 #endif
 }
+
+void timespec_get_monotonic(struct timespec *t)
+{
+	if (clock_gettime(CLOCK_MONOTONIC, t) == -1) {
+		log_fatal("util", "Failed to obtain monotonic time: %d: %s", errno, strerror(errno));
+	}
+}

@@ -72,4 +72,7 @@ double now(void);
 // to `gettimeofday` which was ZMap's original implementation.
 double steady_now(void);
 
+// Get monotonic time into a timespec structure
+void timespec_get_monotonic(struct timespec *t);
+
 #endif /* ZMAP_UTIL_H */

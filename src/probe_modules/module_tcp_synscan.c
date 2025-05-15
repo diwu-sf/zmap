@@ -18,6 +18,7 @@
 #include <math.h>
 
 #include "../../lib/includes.h"
+#include "../../lib/util.h"
 #include "../fieldset.h"
 #include "logger.h"
 #include "module_tcp_synscan.h"
@@ -35,6 +36,48 @@ probe_module_t module_tcp_synscan;
 
 static uint16_t num_source_ports;
 static uint8_t os_for_tcp_options;
+
+#ifndef NSEC_PER_SEC
+#define NSEC_PER_SEC 1000000000
+#endif
+#ifndef NSEC_PER_MSEC
+#define NSEC_PER_MSEC 1000000
+#endif
+#ifndef MSEC_PER_SEC
+#define MSEC_PER_SEC 1000
+#endif
+
+static struct timespec
+timespec_diff(struct timespec const *t1, struct timespec const *t0)
+{
+	struct timespec diff = {
+	    .tv_sec = t1->tv_sec - t0->tv_sec,
+	    .tv_nsec = t1->tv_nsec - t0->tv_nsec,
+	};
+	if (diff.tv_nsec < 0) {
+		diff.tv_sec--;
+		diff.tv_nsec += NSEC_PER_SEC;
+	}
+	return diff;
+}
+
+static uint64_t
+timespec_to_tenth_ms64(struct timespec const *t)
+{
+	/* Convert to 1/10th of millisecond */
+	return ((uint64_t)t->tv_sec * MSEC_PER_SEC * 10) + ((uint64_t)t->tv_nsec / (NSEC_PER_MSEC / 10));
+}
+
+static uint64_t
+timespec_ticks_since(struct timespec const *t_ref)
+{
+	struct timespec t_now;
+	timespec_get_monotonic(&t_now);
+	struct timespec t_diff = timespec_diff(&t_now, t_ref);
+	return timespec_to_tenth_ms64(&t_diff);
+}
+
+static struct timespec t_begin;
 
 static int synscan_global_initialize(struct state_conf *state)
 {
@@ -80,6 +123,7 @@ static int synscan_global_initialize(struct state_conf *state)
 	// double-check arithmetic
 	assert(zmap_tcp_synscan_packet_len - zmap_tcp_synscan_tcp_header_len == 34);
 
+	timespec_get_monotonic(&t_begin);
 	return EXIT_SUCCESS;
 }
 
@@ -106,7 +150,9 @@ static int synscan_make_packet(void *buf, size_t *buf_len, ipaddr_n_t src_ip,
 	struct ether_header *eth_header = (struct ether_header *)buf;
 	struct ip *ip_header = (struct ip *)(&eth_header[1]);
 	struct tcphdr *tcp_header = (struct tcphdr *)(&ip_header[1]);
-	uint32_t tcp_seq = validation[0];
+
+	uint64_t ticks = timespec_ticks_since(&t_begin);
+	uint32_t tcp_seq = validation[0] ^ ((uint32_t)ticks & 0x00FFFFFF);
 
 	ip_header->ip_src.s_addr = src_ip;
 	ip_header->ip_dst.s_addr = dst_ip;
@@ -182,13 +228,13 @@ static int synscan_validate_packet(const struct ip *ip_hdr, uint32_t len,
 		// We treat RST packets different from non RST packets
 		if (tcp->th_flags & TH_RST) {
 			// For RST packets, recv(ack) == sent(seq) + 0 or + 1
-			if (htonl(tcp->th_ack) != htonl(validation[0]) &&
-			    htonl(tcp->th_ack) != htonl(validation[0]) + 1) {
+			if ((htonl(tcp->th_ack) & 0xFF) != (htonl(validation[0]) & 0xFF) &&
+			    (htonl(tcp->th_ack) & 0xFF) != ((htonl(validation[0]) + 1) & 0xFF)) {
 				return PACKET_INVALID;
 			}
 		} else {
 			// For non RST packets, recv(ack) == sent(seq) + 1
-			if (htonl(tcp->th_ack) != htonl(validation[0]) + 1) {
+			if ((htonl(tcp->th_ack) & 0xFF) != ((htonl(validation[0]) + 1) & 0xFF)) {
 				return PACKET_INVALID;
 			}
 		}
@@ -329,9 +375,21 @@ static void synscan_process_packet(const u_char *packet, UNUSED uint32_t len,
 		if (tcp->th_flags & TH_RST) { // RST packet
 			fs_add_constchar(fs, "classification", "rst");
 			fs_add_bool(fs, "success", 0);
+			fs_add_null(fs, "rtt");
 		} else { // SYNACK packet
 			fs_add_constchar(fs, "classification", "synack");
 			fs_add_bool(fs, "success", 1);
+			uint64_t ticks_now = timespec_ticks_since(&t_begin) & 0x00FFFFFF;
+			uint64_t ticks_pkt = htonl(ntohl(tcp->th_ack) - 1) ^ validation[0];
+			assert(ticks_pkt < 0x01000000); // should not have gotten past validation
+			uint64_t rtt;
+			if (ticks_now >= ticks_pkt) {
+				rtt = (ticks_now - ticks_pkt) & 0x00FFFFFF;
+			} else {
+				// Handle wraparound: add 2^24 to account for the full cycle
+				rtt = ((ticks_now + 0x01000000) - ticks_pkt) & 0x00FFFFFF;
+			}
+			fs_add_uint64(fs, "rtt", rtt);
 		}
 		fs_add_null_icmp(fs);
 	} else if (ip_hdr->ip_p == IPPROTO_ICMP) {
@@ -351,6 +409,8 @@ static void synscan_process_packet(const u_char *packet, UNUSED uint32_t len,
 		fs_add_bool(fs, "success", 0);
 		// icmp
 		fs_populate_icmp_from_iphdr(ip_hdr, len, fs);
+		// rtt
+		fs_add_null(fs, "rtt");
 	}
 }
 
@@ -365,8 +425,9 @@ static fielddef_t fields[] = {
     {.name = "tcpopt_sack_perm", .type = "int", .desc = "TCP SACK permitted option"},
     {.name = "tcpopt_ts_val", .type = "int", .desc = "TCP timestamp option value"},
     {.name = "tcpopt_ts_ecr", .type = "int", .desc = "TCP timestamp option echo reply"},
-    CLASSIFICATION_SUCCESS_FIELDSET_FIELDS,
+	CLASSIFICATION_SUCCESS_FIELDSET_FIELDS,
     ICMP_FIELDSET_FIELDS,
+	{.name = "rtt", .type = "int", .desc = "RTT in 1/10th of ms"},
 };
 
 probe_module_t module_tcp_synscan = {
