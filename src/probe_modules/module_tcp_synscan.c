@@ -407,10 +407,10 @@ static void synscan_process_packet(const u_char *packet, UNUSED uint32_t len,
 		// global
 		fs_add_constchar(fs, "classification", "icmp");
 		fs_add_bool(fs, "success", 0);
-		// icmp
-		fs_populate_icmp_from_iphdr(ip_hdr, len, fs);
 		// rtt
 		fs_add_null(fs, "rtt");
+		// icmp
+		fs_populate_icmp_from_iphdr(ip_hdr, len, fs);
 	}
 }
 
@@ -426,8 +426,8 @@ static fielddef_t fields[] = {
     {.name = "tcpopt_ts_val", .type = "int", .desc = "TCP timestamp option value"},
     {.name = "tcpopt_ts_ecr", .type = "int", .desc = "TCP timestamp option echo reply"},
 	CLASSIFICATION_SUCCESS_FIELDSET_FIELDS,
-    ICMP_FIELDSET_FIELDS,
 	{.name = "rtt", .type = "int", .desc = "RTT in 1/10th of ms"},
+    ICMP_FIELDSET_FIELDS,
 };
 
 probe_module_t module_tcp_synscan = {
